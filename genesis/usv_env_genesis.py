@@ -76,8 +76,20 @@ class USVEnv:
         self.num_actions = self.env_cfg["num_actions"]
         self.num_commands = command_cfg["num_commands"]
 
+        # goal-conditioned mode: resample the target on every reset and expose the
+        # boat-to-target vector in the observation
+        # NOTE: every target key is resolved with a default, so configs pickled before
+        # these keys existed (such as logs/ama_1/cfgs.pkl) still load
+        self.randomize_target = command_cfg.get("randomize_target", False)
+        self.default_target = command_cfg.get("target_pos", (5.0, 0.0, 0.0))
+        self.target_ranges = (command_cfg.get("pos_x_range", (3.0, 5.0)),
+                              command_cfg.get("pos_y_range", (-1.5, 1.5)),
+                              command_cfg.get("pos_z_range", (0.0, 0.0)))
+
         self.dt = self.env_cfg["dt"]
-        self.reward_scales = reward_cfg["reward_scales"]
+        # copy: scales are multiplied by dt below, and mutating the caller's dict
+        # would double-scale them if the env is rebuilt from the same config
+        self.reward_scales = dict(reward_cfg["reward_scales"])
         self.max_episode_length = math.ceil(self.env_cfg["episode_length_seconds"] / self.dt)
 
         # initialize the physics engine
@@ -156,8 +168,10 @@ class USVEnv:
                 morph=gs.morphs.Mesh(
                     file="meshes/sphere.obj",
                     scale=0.2,
-                    pos=(5.0, 0.0, 0.0), # fixed target for now
-                    fixed=True,
+                    pos=self.default_target,
+                    # a fixed entity has no DOFs and cannot be repositioned per environment,
+                    # so the marker is only pinned when the target never moves
+                    fixed=not self.randomize_target,
                     collision=False,
                 ),
                 surface=gs.surfaces.Rough(
@@ -234,7 +248,12 @@ class USVEnv:
         self.obstacle_radius = torch.tensor(self.env_cfg["obstacle_max_radius"], device=self.device, dtype=gs.tc_float)
 
         # targets
-        self.commands = torch.tensor((5.0, 0.0, 0.0), device=self.device, dtype=gs.tc_float).repeat(self.num_envs, 1)
+        self.commands = torch.tensor(self.default_target,
+                                     device=self.device, dtype=gs.tc_float).repeat(self.num_envs, 1)
+
+        # 6-dof pose of the visual target marker, only used when the target is resampled
+        self.target_pose = torch.zeros((self.num_envs, 6), device=self.device, dtype=gs.tc_float)
+        self.target_pose[:, :3] = self.commands
         self.actions = torch.zeros((self.num_envs, self.num_actions), device=self.device, dtype=gs.tc_float)
         self.last_actions = torch.zeros_like(self.actions)
 
@@ -250,6 +269,19 @@ class USVEnv:
 
         # distance to obstacles
         self.dist_to_obstacles = torch.norm(self.obstacle_position - self.boat_core_pose.unsqueeze(1).repeat(1, self.num_obstacles, 1)[:, :, :2], dim=2)
+
+        # obs layout: boat pose (x, y, yaw) + boat velocity (vx, vy, yaw_rate)
+        #             + distance to each obstacle + obstacle (x, y) + last actions
+        expected_num_obs = 6 + self.num_obstacles + 2 * self.num_obstacles + self.num_actions
+        if self.randomize_target:
+            expected_num_obs += 2 # boat-to-target vector
+        if self.num_obs != expected_num_obs:
+            raise ValueError(
+                f'obs_cfg["num_obs"] is {self.num_obs} but the observation layout produces '
+                f'{expected_num_obs} values for num_obstacles={self.num_obstacles}, '
+                f'num_actions={self.num_actions} and randomize_target={self.randomize_target}. '
+                f'Update obs_cfg in usv_env_cfg.py, or load a checkpoint that was trained '
+                f'with a matching layout.')
 
         # extra information for logging
         self.extras = dict()
@@ -329,6 +361,10 @@ class USVEnv:
         for i, obstacle_dict in enumerate(self.dynamic_obstacles):
             obstacle_dict["obstacle"].set_dofs_position(self.obstacle_pose[:, i], zero_velocity=True)
 
+        # a resampled target is not a fixed entity, so hold it against gravity
+        if self.randomize_target and self.target is not None:
+            self.target.set_dofs_position(self.target_pose, zero_velocity=True)
+
         # update buffers
         self.episode_length_buf += 1
         self.last_core_pose[:] = self.boat_core_pose[:]
@@ -345,42 +381,51 @@ class USVEnv:
         self.reset_buf = (self.episode_length_buf > self.max_episode_length)
 
         # build a collision mask, reset if collision!
-        collision_mask = self.dist_to_obstacles < (self.obstacle_radius + self.env_cfg["boat_core_radius"]) + 0.05
+        collision_threshold = (self.obstacle_radius + self.env_cfg["boat_core_radius"]
+                               + self.env_cfg["collision_margin"])
+        collision_mask = self.dist_to_obstacles < collision_threshold
         if collision_mask.any():
             self.reset_buf[collision_mask.any(dim=1)] = True
 
-        # reset the envs
-        self.reset_idx(self.reset_buf.nonzero(as_tuple=False).flatten())
-
-        # last action
-        self.last_actions[:] = self.actions[:]
-
         # compute reward, according to reward_cfg
+        # NOTE: this runs before reset_idx so the terminal transition of an episode is
+        # scored from the state the boat actually reached, not from the reset state
         self.rew_buf[:] = 0.0
         for name, reward_func in self.reward_functions.items():
             rew = reward_func() * self.reward_scales[name]
             self.rew_buf += rew
             self.episode_sums[name] += rew
 
+        # last action, recorded after the reward so that _reward_smooth compares the
+        # current action against the previous step's action instead of against itself
+        self.last_actions[:] = self.actions[:]
+
+        # reset the envs, this also zeroes last_actions for the environments it touches
+        self.reset_idx(self.reset_buf.nonzero(as_tuple=False).flatten())
+
         # collect observations, NOTE: add obstacle velocity if planning to use dynamic obstacles
-        self.obs_buf = torch.cat(
-            [
-                # boat
-                self.boat_core_pose[:, :2],
-                self.boat_core_pose[:, 5].unsqueeze(1),
-                self.boat_core_velocity[:, :2],
-                self.boat_core_velocity[:, 5].unsqueeze(1),
+        obs_terms = [
+            # boat
+            self.boat_core_pose[:, :2],
+            self.boat_core_pose[:, 5].unsqueeze(1),
+            self.boat_core_velocity[:, :2],
+            self.boat_core_velocity[:, 5].unsqueeze(1),
 
-                # obstacles
-                self.dist_to_obstacles.view(self.num_envs, -1),
-                self.obstacle_position.view(self.num_envs, -1),
-                # self.obstacle_velocity[:, :, :2].reshape(self.num_envs, -1),
+            # obstacles
+            self.dist_to_obstacles.view(self.num_envs, -1),
+            self.obstacle_position.view(self.num_envs, -1),
+            # self.obstacle_velocity[:, :, :2].reshape(self.num_envs, -1),
 
-                # history
-                self.last_actions,
-            ],
-            axis=-1,
-        )
+            # history
+            self.last_actions,
+        ]
+
+        # the target only belongs in the observation when it moves, a fixed target is
+        # a constant the policy can absorb into its weights
+        if self.randomize_target:
+            obs_terms.append(self.rel_boat_pos[:, :2])
+
+        self.obs_buf = torch.cat(obs_terms, axis=-1)
 
         return self.obs_buf, None, self.rew_buf, self.reset_buf, self.extras # extras are empty for now
 
@@ -412,6 +457,9 @@ class USVEnv:
         # reset boat core
         self.boat_core_pose[envs_idx] = self.boat_core_pose_init
         self.last_core_pose[envs_idx] = torch.zeros_like(self.boat_core_pose_init)
+
+        # draw a new target before the relative position below is derived from it
+        self._resample_commands(envs_idx)
 
         self.rel_boat_pos[envs_idx] = self.commands[envs_idx] - self.boat_core_pose[envs_idx, :3]
         self.last_rel_boat_pos[envs_idx] = self.rel_boat_pos[envs_idx]
@@ -461,17 +509,23 @@ class USVEnv:
     def _resample_commands(self, envs_idx):
         """ Resample the target positions for the given environments.
 
-        TODO: Not implemented yet.
+        Only has an effect when command_cfg["randomize_target"] is True. The sampling
+        ranges come from command_cfg, and the visual marker is moved to match.
 
         Args:
             envs_idx (ArrayLike): Indices of the environments to resample the target.
         """
 
-        self.commands[envs_idx, 0] = self._gs_rand_float(*self.command_cfg["pos_x_range"], (len(envs_idx),), self.device)
-        self.commands[envs_idx, 1] = self._gs_rand_float(*self.command_cfg["pos_y_range"], (len(envs_idx),), self.device)
-        self.commands[envs_idx, 2] = self._gs_rand_float(*self.command_cfg["pos_z_range"], (len(envs_idx),), self.device)
+        if not self.randomize_target or len(envs_idx) == 0:
+            return
+
+        for axis, value_range in enumerate(self.target_ranges):
+            self.commands[envs_idx, axis] = self._gs_rand_float(*value_range, (len(envs_idx),), self.device)
+
+        # move the marker, it carries free DOFs in this mode so it is driven like the obstacles
         if self.target is not None:
-            self.target.set_pos(self.commands[envs_idx], zero_velocity=True, envs_idx=envs_idx)
+            self.target_pose[envs_idx, :3] = self.commands[envs_idx]
+            self.target.set_dofs_position(self.target_pose[envs_idx], zero_velocity=True, envs_idx=envs_idx)
 
     # -------------------------- reward functions ------------------------- #
     def _reward_target(self):

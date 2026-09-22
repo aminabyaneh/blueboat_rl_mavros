@@ -21,7 +21,6 @@ env_cfg = {
     "num_actions": 2, # velocity: magnitude + angle
     "episode_length_seconds": 5.0,
     "target_color": (1.0, 0.0, 0.0),
-    "image_observation": True,
 
     # obstacles
     "obstacle_static": True,
@@ -56,12 +55,30 @@ env_cfg = {
 
 # config for the observations
 obs_cfg = {
+    # 6 (boat x, y, yaw + vx, vy, yaw_rate) + 3 * num_obstacles + num_actions,
+    # plus 2 more when command_cfg["randomize_target"] is enabled.
+    # The environment checks this at construction and reports a mismatch.
     "num_obs": 23,
 }
 
-# config for the command
+# config for the command (the target the boat is asked to reach)
 command_cfg = {
     "num_commands": 3,
+
+    # Goal-conditioned training. When False the target stays at target_pos, which
+    # reproduces the behaviour the committed ama_1 policy was trained with.
+    # When True the target is resampled on every reset and the boat-to-target vector is
+    # appended to the observation, so remember to set obs_cfg["num_obs"] to 25.
+    "randomize_target": False,
+
+    # where the target sits when randomize_target is False
+    "target_pos": (5.0, 0.0, 0.0),
+
+    # sampling ranges when randomize_target is True,
+    # kept inside the navigable area defined by env_cfg["grid_size"]
+    "pos_x_range": (3.0, 5.0),
+    "pos_y_range": (-1.5, 1.5),
+    "pos_z_range": (0.0, 0.0),
 }
 
 # config for the command
