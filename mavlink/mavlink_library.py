@@ -34,8 +34,8 @@ def ack(the_connection, keyword):
         None
     """
 
-    print(f'\t MAVLINK - ACK - Message read: {str(the_connection.recv_match(type=keyword,
-          blocking=True, timeout=1))}')
+    message = the_connection.recv_match(type=keyword, blocking=True, timeout=1)
+    print(f'\t MAVLINK - ACK - Message read: {message}')
 
 
 def establish_heartbeat(udp):
@@ -177,7 +177,7 @@ def land(the_connection):
 
     """
 
-    print('MAVLINK - Running Takeoff command')
+    print('MAVLINK - Running Land command')
 
     the_connection.mav.command_long_send(the_connection.target_system,
                                          the_connection.target_component, 0,
@@ -535,7 +535,7 @@ def set_mission_current(the_connection, seq):
         None
     """
 
-    print('MAVLINK - Setting mission item {seq} as current item')
+    print(f'MAVLINK - Setting mission item {seq} as current item')
     the_connection.mav.command_long_send(the_connection.target_system,
                                          the_connection.target_component,
                                          mavutil.mavlink.MAV_CMD_DO_SET_MISSION_CURRENT,
