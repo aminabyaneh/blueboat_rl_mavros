@@ -1,12 +1,8 @@
 import torch
 
-import genesis as gs
-
-from usv_env_genesis import USVEnv
-
-from typing import List
 from pynput import keyboard
 
+from usv_env_genesis import USVEnv
 from usv_env_cfg import env_cfg, obs_cfg, command_cfg, reward_cfg
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -14,6 +10,13 @@ device = "cuda:0" if torch.cuda.is_available() else "cpu"
 env_cfg["num_envs"] = 1
 env_cfg["render"] = True
 env_cfg["num_visualize_envs"] = 1
+
+# simulation time
+# NOTE: this must be set before the env is built, the env derives its episode
+# length from it at construction time
+total_sim_time = 60 # seconds
+env_cfg["episode_length_seconds"] = total_sim_time
+total_sim_steps = int(total_sim_time / env_cfg["dt"])
 
 # create the USV environment
 env = USVEnv(
@@ -28,7 +31,7 @@ linear_velocity = 0
 angular_velocity = 0
 
 linear_increment = env_cfg["boat_max_lin_speed"] / 10
-angular_increment = env_cfg["boat_max_lin_speed"] / 10
+angular_increment = env_cfg["boat_max_ang_speed"] / 10
 
 # keyboard handle
 def on_press(key):
@@ -65,10 +68,7 @@ def on_release(key):
 listener = keyboard.Listener(on_press=on_press, on_release=on_release)
 listener.start()
 
-# simulation time
-total_sim_time = 60 # seconds
-env_cfg["episode_length_seconds"] = total_sim_time
-total_sim_steps = int(total_sim_time / env_cfg["dt"])
+print("Controls: arrow up/down = forward/reverse, arrow left/right = turn. Ctrl+C to quit.")
 
 # simulation main loop
 for simulation_step in range(total_sim_steps):

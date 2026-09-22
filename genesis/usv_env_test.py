@@ -1,5 +1,9 @@
 """
-usv_env_genesis.py
+usv_env_test.py
+
+Smoke test for the USV environment: builds it from the default configuration and
+drives it with random actions. Use this to confirm Genesis is installed correctly
+before starting a training run.
 """
 
 import torch
@@ -30,7 +34,6 @@ def main():
 
         # perform a step in the environment with the action
         obs, _, reward, reset, extras = env.step(action)
-
 
 
 if __name__ == "__main__":
