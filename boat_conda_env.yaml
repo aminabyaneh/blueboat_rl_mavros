@@ -230,4 +230,3 @@ dependencies:
     - wrapt==1.17.2
     - xxhash==3.5.0
     - yarl==1.18.3
-prefix: /home/amin/anaconda3/envs/boat

@@ -1,0 +1,20 @@
+# Direct dependencies for this repo, pinned to the versions the committed runs were
+# produced with. For a byte-for-byte Linux environment use boat_conda_env.yaml instead.
+#
+#   pip install -r requirements.txt
+#
+# rsl_rl is NOT on PyPI at the version this repo targets. Install it separately:
+#   git clone https://github.com/leggedrobotics/rsl_rl
+#   cd rsl_rl && git checkout v1.0.2 && pip install -e .
+
+# --- simulation and RL (genesis/) ---
+genesis-world==0.2.1
+torch==2.6.0
+numpy==1.26.4          # genesis 0.2.1 requires numpy < 2
+scipy==1.15.1
+tensorboard==2.18.0
+pynput==1.7.7          # keyboard control in usv_interactive.py
+
+# --- BlueBoat communication (mavlink/) ---
+pymavlink==2.4.42
+pandas==2.2.3

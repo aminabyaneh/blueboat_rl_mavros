@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Training artifacts: keep the committed reference run, ignore new local ones
+genesis/logs/*
+!genesis/logs/ama_1/
+
+# Evaluation recordings
+genesis/*.mp4
+genesis/*.gif
+
+# MAVLink flight logs
+mavlink/logs/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
